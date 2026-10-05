@@ -1,3 +1,5 @@
+<img width="1920" height="1080" alt="thumbnail4" src="https://github.com/user-attachments/assets/2675d3d0-b809-4a04-8657-13ed2f553569" />
+
 # Ragdoll On Command
 
 A Helldivers 2 Lua mod for [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader) that ragdolls your Helldiver with a key press.
