@@ -1,0 +1,13 @@
+{
+    "name": "mods/alomare/ragdoll_on_command",
+    "guid": "f64d9efb-beba-4479-bc33-bade5d465966",
+    "displayName": "Ragdoll On Command",
+    "entry": "ragdoll_on_command.lua",
+    "version": "1",
+    "icon": "icon.png",
+    "description": "Ragdoll your Helldiver with a key press. Set the key in Mod Bindings Menu (Options > Controls > MODS).",
+    "requires": [
+        "Bingus Shared Loader v17 or newer",
+        "Mod Bindings Menu"
+    ]
+}
