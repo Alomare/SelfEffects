@@ -5,6 +5,8 @@
 -- starts unbound). It runs the game's own knockdown sequence on the local Helldiver: not already ragdolled, allowed
 -- right now (the game refuses while diving, swimming, climbing and the like), then start. The game ends the ragdoll
 -- and stands the Helldiver up by itself, as after an explosion.
+-- Mod Options Menu (escape menu > MODS, optional) sets a delay between the key press and the ragdoll (0 to 1000 ms,
+-- counted with the frame time); presses while a delayed ragdoll is pending are ignored.
 --
 -- The local Helldiver is found as the game's own "is this the local avatar" check finds it: the local player's
 -- unit, its entity, then the avatar manager's index for that entity. Every native function is called only after
@@ -19,7 +21,7 @@ if rawget(_G, 'RagdollOnCommand') then return end
 local ffi = require('ffi')
 local bit = require('bit')
 
-local M = {version = '1', frames = 0, errors = 0}
+local M = {version = '2', frames = 0, errors = 0}
 rawset(_G, 'RagdollOnCommand', M)
 
 local loader = rawget(_G, 'CowboyBingusModLoader')
@@ -295,6 +297,8 @@ end
 -- Configuration
 
 local BINDING = 'alomare.ragdoll_on_command.ragdoll'
+local DELAY_OPTION = 'alomare.ragdoll_on_command.delay'
+local DELAY = {min = 0, max = 1000, step = 50, default = 0}  -- milliseconds between the key press and the ragdoll
 local REQUIRED = {'local_avatar', 'unit_lookup', 'knockdown', 'ragdoll_check'}
 local MAX_PROBES = 256       -- hash map probes per lookup
 local MAX_AVATARS = 64      -- avatar indexes
@@ -340,12 +344,12 @@ end
 local T = mod_text.module
 local tr = T.new(mod_text.locales.en, mod_text.locales.bundled, function(message) note('Text: ' .. message) end)
 
--- Mod Bindings Menu v2.1+ (version 3) takes texts as functions and calls them when its pages open, so they follow
--- the game's language; older versions take strings with byte limits, where a translation that does not fit stays
--- English. One function per key, so repeated registrations agree.
+-- Mod Options Menu v1.1+ (version 2) and Mod Bindings Menu v2.1+ (version 3) take texts as functions and call them
+-- when their pages open, so the texts follow the game's language; older versions take strings with byte limits,
+-- where a translation that does not fit stays English. One function per key, so repeated registrations agree.
 local text_functions = {}
-local function host_text(host, key, bytes)
-    if (tonumber(host.version) or 1) >= 3 then
+local function host_text(host, functions_from, key, bytes)
+    if (tonumber(host.version) or 1) >= functions_from then
         local fn = text_functions[key]
         if not fn then fn = function() return tr(key) end; text_functions[key] = fn end
         return fn
@@ -575,8 +579,8 @@ local function key_pressed()
     end
     if not key.registered then
         key.registered = true
-        local ok, res, why = pcall(menu.register_binding, BINDING, host_text(menu, 'binding.ragdoll', 64), nil,
-                                   {category = host_text(menu, 'option.mod', 64)})
+        local ok, res, why = pcall(menu.register_binding, BINDING, host_text(menu, 3, 'binding.ragdoll', 64), nil,
+                                   {category = host_text(menu, 3, 'option.mod', 64)})
         note('Mod Bindings Menu binding: ' .. ((ok and res) and 'registered' or
              ('not registered (' .. tostring(ok and why or res) .. ')')))
         if ok and res and M.ready then
@@ -588,6 +592,36 @@ local function key_pressed()
     local edge = down and not key.down
     key.down = down
     return edge
+end
+
+---------------------------------------------------------------------------------------
+-- Delay: Mod Options Menu (optional; it may load before or after this addon). Without it there is no delay.
+
+local options = {menu = nil, delay = DELAY.default}
+
+local function set_delay(value)
+    value = tonumber(value) or DELAY.default
+    value = math.max(DELAY.min, math.min(DELAY.max, value))
+    if value ~= options.delay then note(string.format('Delay set to %d ms', value)) end
+    options.delay = value
+end
+
+local function connect_options()
+    local menu = rawget(_G, 'ModOptionsMenu')
+    if type(menu) ~= 'table' or menu.api ~= 1 then return end
+    options.menu = menu
+    local ok, done, why = pcall(menu.register_option, DELAY_OPTION, {
+        type = 'slider', label = host_text(menu, 2, 'option.delay.label', 64), mod = host_text(menu, 2, 'option.mod', 40),
+        min = DELAY.min, max = DELAY.max, step = DELAY.step, default = DELAY.default,
+        description = host_text(menu, 2, 'option.delay.description', 400)})
+    if ok and done then
+        pcall(menu.on_change, DELAY_OPTION, set_delay)
+        local got, value = pcall(menu.get, DELAY_OPTION)
+        set_delay(got and value)
+    else
+        note('Option ' .. DELAY_OPTION .. ' not registered: ' .. tostring(ok and why or done))
+    end
+    note('Mod Options Menu connected (version ' .. tostring(menu.version or 1) .. ')')
 end
 
 ---------------------------------------------------------------------------------------
@@ -618,21 +652,38 @@ local function start()
     end
 end
 
-local function frame()
+local pending = nil  -- seconds left before a delayed ragdoll
+
+local function frame(dt)
     M.frames = M.frames + 1
+    if not options.menu then connect_options() end
     if not M.started then start(); return end
     if not M.ready then
         if code.scan and code:step() then finish_resolution() end
         return
     end
-    if key_pressed() then ragdoll() end
+    -- A pending ragdoll counts down before this frame's press is looked at, so the press frame's time doesn't count.
+    if pending then
+        pending = pending - (tonumber(dt) or 0)
+        if pending <= 0 then pending = nil; ragdoll() end
+    end
+    if key_pressed() then
+        if pending then
+            note('Ragdoll key: ignored (a delayed ragdoll is pending)')
+        elseif options.delay > 0 then
+            pending = options.delay / 1000
+            note(string.format('Ragdoll key: ragdoll in %d ms', options.delay))
+        else
+            ragdoll()
+        end
+    end
     watch_step()
 end
 
 local original_update = rawget(_G, 'update')
 update = function(dt, ...)
     if not M.retired then
-        local ok, err = xpcall(frame, debug.traceback)
+        local ok, err = xpcall(frame, debug.traceback, dt)
         if not ok then
             M.errors = M.errors + 1
             note('Error: ' .. tostring(err))

@@ -96,20 +96,17 @@ package.loaded.ffi = setmetatable({
 ModBindingsMenu = {api = 1, register_binding = function(id, label, slot, o)
     fake.bound = id .. '|' .. label .. '|' .. tostring(slot) .. '|' .. o.category; return true end,
                    is_down = function(id) return fake.menu end}
+-- Mod Options Menu (installed by tests that set fake.with_options): registrations, the applied value, callbacks.
+fake.option_menu = {api = 1, version = 2,
+    register_option = function(id, spec) fake.option_id, fake.option = id, spec; return true end,
+    get = function(id) return fake.option_value end,
+    on_change = function(id, fn) fake.option_changed = fn; return true end}
 '''
 
 
-def run():
-    logdir = Path(tempfile.mkdtemp())
-    lua = LuaRuntime(unpack_returned_tuples=True)
-    lua.execute(HARNESS, str(logdir), DUMP)
+def world(lua):
+    """The local avatar chain on the fake heap; returns (players blob, ragdoll state address, flags address)."""
     f = lua.globals().fake
-    ok = []
-
-    def check(cond, what):
-        ok.append(cond)
-        print('PASS' if cond else 'FAIL', what)
-
     # The players global -> players: local active, local unit.
     f.patch(0x3326468, struct.pack('<Q', P))
     players = bytearray(0x400)
@@ -131,6 +128,21 @@ def run():
     f.heap(flags_at, struct.pack('<QQ', 0x4, 0))
     lua.execute('function fake.on_start() fake.heap(%d, string.char(4,0,0,0,0,0,0,0) .. '
                 'string.char(0,0,0,0,0x10,0,0,0)) end' % flags_at)
+    return players, state, flags_at
+
+
+def run():
+    logdir = Path(tempfile.mkdtemp())
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(HARNESS, str(logdir), DUMP)
+    f = lua.globals().fake
+    ok = []
+
+    def check(cond, what):
+        ok.append(cond)
+        print('PASS' if cond else 'FAIL', what)
+
+    players, state, flags_at = world(lua)
 
     check(not sigspec.check(signatures.SCRIPT, sigspec.build(signatures.SPECS)),
           "the script's signature blocks match research/signatures.py")
@@ -180,6 +192,44 @@ def run():
     f2 = lua2.globals().fake
     check(callable(f2.label) and f2.label() == 'Ragdoll' and f2.category() == 'Ragdoll On Command',
           'v2.1 bindings: label and section passed as functions')
+    check(f.option_id is None and 'Delay set' not in log(), 'without Mod Options Menu: no delay, the press acts at once')
+
+    # Mod Options Menu: the delay slider (0-1000 ms, 50 ms steps, 0 by default), texts as functions (version 2).
+    logdir3 = Path(tempfile.mkdtemp())
+    lua3 = LuaRuntime(unpack_returned_tuples=True)
+    lua3.execute(HARNESS, str(logdir3), DUMP)
+    f3 = lua3.globals().fake
+    world(lua3)
+    lua3.execute('fake.option_value = 250; ModOptionsMenu = fake.option_menu')
+    lua3.execute(SOURCE)
+    lua3.execute('for i = 1, 5 do update(0.016) end')
+    o = f3.option
+    log3 = lambda: (logdir3 / 'RagdollOnCommand.log').read_text()
+    check(f3.option_id == 'alomare.ragdoll_on_command.delay' and o.type == 'slider' and o.min == 0 and o.max == 1000
+          and o.step == 50 and o.default == 0 and callable(o.label)
+          and o.label() == 'Delay After Key Press (Milliseconds)' and o.mod() == 'Ragdoll On Command'
+          and o.description().startswith('Time between pressing the Ragdoll key'),
+          'delay slider registered: 0-1000 ms in 50 ms steps, 0 by default, texts as functions')
+    check('Delay set to 250 ms' in log3(), 'the applied value is read at registration')
+    # A press at 250 ms: nothing for 15 frames of 1/64 s (the press frame doesn't count), then the ragdoll.
+    lua3.execute('fake.menu = true; update(0.015625); fake.menu = false')
+    lua3.execute('for i = 1, 15 do update(0.015625) end')
+    early = len(f3.calls)
+    lua3.execute('update(0.015625)')
+    calls = list(f3.calls.values())
+    check(early == 0 and calls[2:3] == ['start a75fa0 0x%x 0' % (A + 0x53dd48 + AI * STRIDE)]
+          and 'Ragdoll key: ragdoll in 250 ms' in log3() and 'Ragdolled' in log3(),
+          'delayed 250 ms: nothing after 15 frames of 1/64 s, the ragdoll on the 16th: %r' % calls)
+    # A second press while one is pending is ignored; changing the value applies at once.
+    lua3.execute('fake.ragdolled = false; fake.calls = {}; fake.menu = true; update(0.015625); fake.menu = false; '
+                 'update(0.015625); fake.menu = true; update(0.015625); fake.menu = false; for i = 1, 30 do update(0.015625) end')
+    starts = [c for c in f3.calls.values() if c.startswith('start')]
+    check(len(starts) == 1 and 'ignored (a delayed ragdoll is pending)' in log3(),
+          'a press while a ragdoll is pending is ignored: %r' % starts)
+    lua3.execute('fake.option_changed(0); fake.ragdolled = false; fake.calls = {}; fake.menu = true; update(0.015625); '
+                 'fake.menu = false')
+    starts = [c for c in f3.calls.values() if c.startswith('start')]
+    check(len(starts) == 1 and 'Delay set to 0 ms' in log3(), 'set to 0 in the menu: the press acts the same frame')
     print('%d/%d' % (sum(ok), len(ok)))
     return all(ok)
 
